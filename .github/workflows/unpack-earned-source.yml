@@ -21,7 +21,8 @@ jobs:
         shell: bash
         run: |
           test -f earned-github-source.zip
-          unzip -o earned-github-source.zip
+          unzip -o earned-github-source.zip || test -d src
+          test -f src/App.jsx
           rm earned-github-source.zip
           rm -f .github/workflows/unpack-earned-source.yml
 
