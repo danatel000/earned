@@ -1,0 +1,31 @@
+{
+  "name": "Earned",
+  "short_name": "Earned",
+  "description": "Earned turns logged workouts into clear lifting progress, goals, and training insight.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#06061a",
+  "theme_color": "#06061a",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/lift-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/lift-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/lift-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

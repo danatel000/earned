@@ -1,0 +1,20 @@
+{
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test:ascii": "node scripts/test-ascii-renderer.mjs && node scripts/test-app-ascii-atmosphere.mjs && node scripts/test-forge-ascii.mjs",
+    "test:iop": "node scripts/test-monetization-core.mjs && node scripts/test-recovery-contracts.mjs && node scripts/verify-monetization-ui.cjs",
+    "verify": "node scripts/run-verifiers.cjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.110.0",
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "recharts": "latest",
+    "three": "^0.185.1",
+    "vite": "latest"
+  }
+}
