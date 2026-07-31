@@ -23,6 +23,7 @@ export const FEATURE_IDS = Object.freeze({
   ADVANCED_EXPORT: "advanced_export",
   ADAPTIVE_TRAINING: "adaptive_training",
   RECOVERY_INTEGRATIONS: "recovery_integrations",
+  AI_COACH: "ai_coach",
 });
 
 const freeFeatures = Object.freeze([
@@ -44,6 +45,7 @@ const premiumFeatures = Object.freeze([
   FEATURE_IDS.ADVANCED_EXPORT,
   FEATURE_IDS.ADAPTIVE_TRAINING,
   FEATURE_IDS.RECOVERY_INTEGRATIONS,
+  FEATURE_IDS.AI_COACH,
 ]);
 
 export const PLANS = Object.freeze({

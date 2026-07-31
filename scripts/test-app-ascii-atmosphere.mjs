@@ -20,6 +20,12 @@ assert.deepEqual(resolveAmbientAsciiBudget(),{
 assert.deepEqual(resolveAmbientAsciiBudget({compact:true}),{
   tier:"compact",particles:150,targetFps:20,dpr:1,
 },"Mobile atmosphere must use a compact budget");
+assert.deepEqual(resolveAmbientAsciiBudget({view:"log"}),{
+  tier:"focused",particles:132,targetFps:22,dpr:1.1,
+},"Active training needs a calmer ambient budget so the logger stays readable");
+assert.deepEqual(resolveAmbientAsciiBudget({view:"log",compact:true}),{
+  tier:"focused-compact",particles:96,targetFps:18,dpr:1,
+},"Mobile training must protect input clarity with the lightest active budget");
 assert.deepEqual(resolveAmbientAsciiBudget({reducedMotion:true}),{
   tier:"still",particles:180,targetFps:0,dpr:1,
 },"Reduced motion must render a stable frame");

@@ -4,9 +4,23 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
+    "ruflo:premerge": "node scripts/run-ruflo-workflow.mjs pre-merge-confidence",
+    "ruflo:feature": "node scripts/run-ruflo-workflow.mjs feature-implementation",
+    "ruflo:verify": "node scripts/run-ruflo-workflow.mjs regression-verification",
+    "ruflo:analytics": "node scripts/run-ruflo-workflow.mjs analytics-review",
+    "ruflo:ascii": "node scripts/run-ruflo-workflow.mjs ascii-qa",
     "test:ascii": "node scripts/test-ascii-renderer.mjs && node scripts/test-app-ascii-atmosphere.mjs && node scripts/test-forge-ascii.mjs",
+    "test:launch": "node scripts/test-launch-progress-engine.mjs",
+    "test:ui21": "node scripts/test-21st-ui-system.mjs",
+    "test:workout-ui": "node scripts/test-workout-ui-system.mjs",
+    "test:readiness": "node scripts/test-readiness-explanation.mjs",
+    "test:ruflo-reporting": "node scripts/test-ruflo-reporting.mjs",
     "test:iop": "node scripts/test-monetization-core.mjs && node scripts/test-recovery-contracts.mjs && node scripts/verify-monetization-ui.cjs",
-    "verify": "node scripts/run-verifiers.cjs"
+    "verify": "node scripts/run-verifiers.cjs",
+    "test:coach": "vitest run tests/coach",
+    "test:coach:watch": "vitest tests/coach",
+    "test:coach:policy": "node scripts/coach/run-policy-evals.mjs",
+    "test:coach:knowledge": "node scripts/coach/validate-knowledge.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.110.0",
@@ -16,5 +30,11 @@
     "recharts": "latest",
     "three": "^0.185.1",
     "vite": "latest"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "jsdom": "^29.1.1",
+    "vitest": "^4.1.10"
   }
 }

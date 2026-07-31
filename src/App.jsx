@@ -14,6 +14,9 @@ import PublicLaunch from "./components/experience/PublicLaunch.jsx";
 import AppNavigation from "./components/experience/AppNavigation.jsx";
 import DashboardCommandCenter from "./components/experience/DashboardCommandCenter.jsx";
 import WorkoutCelebration from "./components/experience/WorkoutCelebration.jsx";
+import WorkoutEcosystemRail from "./components/experience/workout/WorkoutEcosystemRail.jsx";
+import {buildWorkoutViewSignal} from "./components/experience/workout/workoutViewSignals.js";
+import {buildReadinessExplanation} from "./analytics/readinessExplanation.js";
 import AppAsciiAtmosphere from "./components/experience/ascii/AppAsciiAtmosphere.jsx";
 import WorkoutAsciiReactor from "./components/experience/ascii/WorkoutAsciiReactor.jsx";
 import AsciiExerciseAnimator from "./components/experience/forge/AsciiExerciseAnimator.jsx";
@@ -43,8 +46,22 @@ import {
   combineHistoryEntries,
   getComparableHistory,
 } from "./tracking/trackingPeriods.js";
+import exerciseEquivalenceData from "../knowledge/coach/exercise-equivalence.json";
+import {
+  buildExerciseSwapQuery,
+  findExerciseSwaps,
+  normalizeExerciseGraph,
+} from "../supabase/functions/_shared/coach/exercise-graph.ts";
+import {
+  buildProgressionState,
+  toProgressionInput,
+} from "../supabase/functions/_shared/coach/progression.ts";
 
 const MONETIZATION_MODE = MONETIZATION_MODES.PREVIEW;
+const EXERCISE_EQUIVALENCE = normalizeExerciseGraph(exerciseEquivalenceData);
+const EXERCISE_EQUIVALENCE_BY_ID = new Map(
+  EXERCISE_EQUIVALENCE.map(row=>[row.exerciseId,row])
+);
 const LOCAL_VISUAL_QA = typeof window!=="undefined"
   && ["127.0.0.1","localhost"].includes(window.location.hostname)
   && new URLSearchParams(window.location.search).get("visualQA")==="1";
@@ -79,6 +96,7 @@ const DAYS = {
       {id:"cb_smith",   name:"Smith Machine Bench", w:175,   r:6,  s:2, note:"175×5 & ×7"},
       {id:"cb_row",     name:"Seated Machine Row",  w:113,   r:7,  s:2, note:"110×10, 120×4"},
       {id:"cb_pecdeck", name:"Pec Deck Chest Fly",  w:220,   r:8,  s:2, note:"220×7 & ×9"},
+      {id:"cb_flat_db", name:"Flat Dumbbell Bench Press", w:50, r:8, s:2},
     ],
   },
   legs:{
@@ -95,8 +113,12 @@ const DAYS = {
   },
 };
 const DAY_KEYS = ["bicepsShoulders","chestBack","legs"];
+export const EARNED_EXERCISE_CATALOG = Object.fromEntries(
+  DAY_KEYS.map(dayKey=>[dayKey,DAYS[dayKey].exercises.map(ex=>({...ex,dayKey}))])
+);
 const MUSCLE_GROUPS = [
   {id:"biceps", label:"Biceps", color:"#7C6FFF"},
+  {id:"triceps", label:"Triceps", color:"#A78BFA"},
   {id:"shoulders", label:"Shoulders", color:"#38BFFF"},
   {id:"chest", label:"Chest", color:"#FF5C87"},
   {id:"back", label:"Back", color:"#FFB347"},
@@ -109,13 +131,12 @@ const EXERCISE_MUSCLES = {
   bs_shpress:"shoulders",
   bs_seated:"shoulders",
   bs_latraise:"shoulders",
-  bs_jm:"biceps",
-  bs_overhead:"biceps",
   cb_pullup:"back",
   cb_incline:"chest",
   cb_smith:"chest",
   cb_row:"back",
   cb_pecdeck:"chest",
+  cb_flat_db:"chest",
   lg_pullup:"back",
   lg_hamcurl:"legs",
   lg_lunge:"legs",
@@ -417,6 +438,12 @@ function getDayVol(entry,dk,customEx={}){
 function getTotalVol(entry,customEx={}){ return DAY_KEYS.reduce((s,dk)=>s+getDayVol(entry,dk,customEx),0); }
 
 function inferMuscleGroup(ex,dayKey){
+  const reviewed=EXERCISE_EQUIVALENCE_BY_ID.get(ex.id);
+  if(reviewed){
+    const primary=reviewed.primaryMuscles[0];
+    if(["biceps","triceps","shoulders","chest","back"].includes(primary)) return primary;
+    return "legs";
+  }
   if(EXERCISE_MUSCLES[ex.id]) return EXERCISE_MUSCLES[ex.id];
   const name=ex.name.toLowerCase();
   if(/curl|chin|bicep|preacher|tricep|jm|extension|pushdown|skull/.test(name)) return "biceps";
@@ -481,15 +508,20 @@ function getExerciseProfile(ex,dayKey){
   const guide=getExerciseGuide(ex,dayKey);
   const muscle=MUSCLE_GROUPS.find(group=>group.id===guide.group);
   const name=ex.name.toLowerCase();
-  let equipment="machine";
-  if(/pull\s?up|chin|dip|push\s?up|bodyweight/.test(name)) equipment="bodyweight";
-  else if(/dumbbell|db|hammer/.test(name)) equipment="dumbbell";
-  else if(/cable|lat|pushdown|pulldown/.test(name)) equipment="cable";
-  else if(/bench|squat|dead|barbell|jm press|press/.test(name)) equipment="barbell";
+  const reviewed=EXERCISE_EQUIVALENCE_BY_ID.get(ex.id);
+  let equipment=reviewed?.equipment[0]||"machine";
+  if(!reviewed){
+    if(/pull\s?up|chin|dip|push\s?up|bodyweight/.test(name)) equipment="bodyweight";
+    else if(/dumbbell|db|hammer/.test(name)) equipment="dumbbell";
+    else if(/cable|lat|pushdown|pulldown/.test(name)) equipment="cable";
+    else if(/bench|squat|dead|barbell|jm press|press/.test(name)) equipment="barbell";
+  }
 
-  let difficulty="beginner";
-  if(/dead|squat|jm press|overhead|pull\s?up|chin|bench|row/.test(name)) difficulty="intermediate";
-  if(/heavy|clean|snatch|single|max/.test(name)) difficulty="advanced";
+  let difficulty=reviewed?.skillLevel||"beginner";
+  if(!reviewed){
+    if(/dead|squat|jm press|overhead|pull\s?up|chin|bench|row/.test(name)) difficulty="intermediate";
+    if(/heavy|clean|snatch|single|max/.test(name)) difficulty="advanced";
+  }
 
   const repRange=guide.group==="shoulders"?"10-15 reps"
     : guide.group==="legs"?"6-12 reps"
@@ -506,7 +538,10 @@ function getExerciseProfile(ex,dayKey){
 
   return {
     ...guide,
-    target:muscle?.label||"Exercise",
+    primaryMuscles:reviewed?[...reviewed.primaryMuscles]:[guide.group],
+    target:reviewed
+      ?reviewed.primaryMuscles[0].replace(/(^|_)([a-z])/g,(_match,_prefix,letter)=>` ${letter.toUpperCase()}`).trim()
+      :muscle?.label||"Exercise",
     color:muscle?.color||"#7C6FFF",
     equipment,
     equipmentLabel:LIBRARY_EQUIPMENT.find(item=>item.id===equipment)?.label||"Machine",
@@ -516,6 +551,10 @@ function getExerciseProfile(ex,dayKey){
     bestUse,
     tempo,
   };
+}
+
+export function getEarnedExerciseProfile(ex,dayKey){
+  return getExerciseProfile(ex,dayKey);
 }
 
 function buildTechniqueCoach(ex,profile,dayKey){
@@ -600,54 +639,57 @@ function buildLibraryWorkoutDraft(dayKey,ex,currentDraft=null){
   };
 }
 
-function buildExerciseSubstitutions(ex,dayKey,customEx={},history=[]){
+function buildExerciseSubstitutions(ex,dayKey,customEx={},history=[],persistedCoachContext=null){
   if(!ex||!dayKey) return [];
-  const sourceProfile=getExerciseProfile(ex,dayKey);
-  const sourceKey=ex.name.toLowerCase().replace(/\s+/g," ").trim();
-  const seenNames=new Set([sourceKey]);
-  const candidates=[];
-  for(const dk of DAY_KEYS){
-    for(const candidate of allExercises(dk,customEx)){
-      const nameKey=candidate.name.toLowerCase().replace(/\s+/g," ").trim();
-      if(candidate.id===ex.id||seenNames.has(nameKey)) continue;
-      const profile=getExerciseProfile(candidate,dk);
-      if(profile.group!==sourceProfile.group) continue;
-      seenNames.add(nameKey);
-      const lastHit=getLastLiftForExercise(history,candidate.id);
-      const lift=lastHit?.lift;
-      const suggested={
-        w:Number(lift?.w??candidate.w??ex.w??0),
-        r:Number(lift?.r??candidate.r??ex.r??0),
-        s:Number(lift?.s??candidate.s??ex.s??1),
-      };
-      const equipmentChanged=profile.equipment!==sourceProfile.equipment;
-      const sameDay=dk===dayKey;
-      const score=
-        70+
-        (sameDay?14:0)+
-        (equipmentChanged?10:3)+
-        (lastHit?9:0)+
-        (profile.difficulty===sourceProfile.difficulty?4:0);
-      const reason=equipmentChanged
-        ?`Same muscle with ${profile.equipmentLabel.toLowerCase()} equipment.`
-        : sameDay
-          ?"Same muscle and same workout day."
-          :`Same muscle from ${DAYS[dk].shortLabel}.`;
-      candidates.push({
-        ex:candidate,
-        dayKey:dk,
-        profile,
-        reason,
-        score,
-        suggested,
-        source:lastHit?getEntryPeriodLabel(lastHit.entry,lastHit.index):"Catalog default",
-        substitutionCoach:true,
-      });
+  const coach=coachState(customEx);
+  const fallbackExclusions=coach.excludedExerciseIds.map(targetKey=>({
+    target_type:"exercise",target_key:targetKey,selector:{},
+  }));
+  const query=buildExerciseSwapQuery({
+    sourceExerciseId:ex.id,
+    graph:EXERCISE_EQUIVALENCE,
+    memberContext:persistedCoachContext?.memberContext,
+    settings:persistedCoachContext?.settings,
+    exclusions:persistedCoachContext?.exclusions||fallbackExclusions,
+    fallbackProfile:coach.profile,
+  });
+  const swaps=findExerciseSwaps(query);
+  return swaps.slice(0,4).flatMap(swap=>{
+    let match=null;
+    let matchDay=null;
+    for(const dk of DAY_KEYS){
+      const candidate=allExercises(dk,customEx).find(row=>row.id===swap.exerciseId);
+      if(candidate){match=candidate;matchDay=dk;break;}
     }
-  }
-  return candidates
-    .sort((a,b)=>b.score-a.score||a.ex.name.localeCompare(b.ex.name))
-    .slice(0,4);
+    if(!match||!matchDay) return [];
+    const profile=getExerciseProfile(match,matchDay);
+    const lastHit=getLastLiftForExercise(history,match.id);
+    const lift=lastHit?.lift;
+    return [{
+      ex:match,
+      dayKey:matchDay,
+      profile,
+      reason:swap.reason,
+      score:swap.score,
+      suggested:{
+        w:Number(lift?.w??match.w??ex.w??0),
+        r:Number(lift?.r??match.r??ex.r??0),
+        s:Number(lift?.s??match.s??ex.s??1),
+      },
+      source:lastHit?getEntryPeriodLabel(lastHit.entry,lastHit.index):"Catalog default",
+      substitutionCoach:true,
+    }];
+  });
+}
+
+export function buildEarnedExerciseSubstitutions(
+  ex,
+  dayKey,
+  customEx={},
+  history=[],
+  persistedCoachContext=null,
+){
+  return buildExerciseSubstitutions(ex,dayKey,customEx,history,persistedCoachContext);
 }
 
 function getMuscleVolumes(entry,customEx={}){
@@ -1227,73 +1269,37 @@ function getExerciseOverloadDecision(history,ex,dayKey){
   if(!latest?.volume) return null;
   const previousHit=getLastLiftForExercise(history.slice(0,latestHit.index),ex.id);
   const previous=previousHit?.lift;
-  const latestRows=getLoggedSetRows(latest);
-  const latestSets=latestRows.length||latest.s||1;
-  const increment=/bench|press|row|curl|raise|delt|preacher|extension|jm/i.test(ex.name)?5:10;
-  const latestRM=epley1RM(latest.w||0,latest.r||0);
-  const previousRM=previous?epley1RM(previous.w||0,previous.r||0):0;
   const volumePct=previous?.volume?pct(latest.volume,previous.volume):null;
-  const highStress=(latestEntry.rpe||0)>=9||latestEntry.deload;
-  let action="Repeat";
-  let nextTarget=`${latest.w} lbs x ${latest.r} reps`;
-  let why="Repeat this lift once more to confirm the baseline.";
-  let color="#38BFFF";
-  let priority=1;
-
-  if(highStress){
-    action="Deload";
-    nextTarget=`${Math.max(0,Math.round((latest.w||0)*0.9))} lbs, clean reps`;
-    why=latestEntry.deload
-      ?`This was marked as a recovery ${latestEntry.periodType===PERIOD_TYPES.DAY?"session":"week"}, so keep the next exposure controlled.`
-      :"RPE was very high, so reduce load or repeat with cleaner reps.";
-    color="#FFB347";
-    priority=5;
-  }else if(!previous){
-    action="Repeat";
-    nextTarget=`${latest.w} lbs x ${latest.r} reps`;
-    why="Only one logged exposure exists, so repeat it once to confirm it is stable.";
-    color="#38BFFF";
-    priority=2;
-  }else if(latest.volume<previous.volume*0.9){
-    action="Repeat";
-    nextTarget=`${latest.w} lbs x ${latest.r} reps`;
-    why=`Volume dropped ${Math.abs(Number(volumePct||0)).toFixed(1)}%, so rebuild before adding load.`;
-    color="#FFB347";
-    priority=4;
-  }else if(latestRM>previousRM||latest.r>=previous.r+2){
-    action="Add Weight";
-    nextTarget=`${(latest.w||0)+increment} lbs`;
-    why="Strength or reps improved enough to justify a small load jump.";
-    color="#2DD4A0";
-    priority=5;
-  }else if(latest.w===previous.w&&latest.r<=previous.r){
-    action="Add Reps";
-    nextTarget=`${latest.w} lbs x ${(latest.r||0)+1} reps`;
-    why="Load stayed flat, so beat reps before increasing weight.";
-    color="#7C6FFF";
-    priority=3;
-  }else if(latestSets<4&&latest.volume>=previous.volume*0.98){
-    action="Add Set";
-    nextTarget=`${latestSets+1} sets at ${latest.w} lbs`;
-    why="Volume is stable and set count is still low enough to add work.";
-    color="#38BFFF";
-    priority=3;
-  }else{
-    action="Repeat";
-    nextTarget=`${latest.w} lbs x ${latest.r} reps`;
-    why="Progress is close to steady. Repeat and make the reps cleaner.";
-    color="#38BFFF";
-    priority=2;
-  }
+  const state=buildProgressionState(toProgressionInput({
+    history,exercise:ex,dayKey,graph:EXERCISE_EQUIVALENCE,readiness:null,
+  }));
+  const presentation={
+    add_weight:{action:"Add Weight",color:"#2DD4A0",priority:5},
+    add_rep:{action:"Add Reps",color:"#7C6FFF",priority:3},
+    add_set:{action:"Add Set",color:"#38BFFF",priority:3},
+    reduce:{action:"Deload",color:"#FFB347",priority:5},
+    hold:{action:"Repeat",color:"#38BFFF",priority:2},
+  }[state.decision];
+  const targetReps=Array.isArray(state.targetReps)?state.targetReps.join("/"):state.targetReps;
+  const nextTarget=`${state.targetWeight} lbs x ${targetReps} reps`;
+  const why=state.decision==="add_weight"
+    ?"Two supported exposures reached the top of the rep range at manageable effort."
+    :state.decision==="add_rep"
+      ?"Load is stable inside the rep range, so add one controlled rep."
+      :state.decision==="reduce"
+        ?"Two consecutive exposures missed the rep-range minimum, so reduce load conservatively."
+        :state.evidenceState==="partially_supported"
+          ?"Only one valid exposure exists, so repeat it before adding load."
+          :"Readiness, effort, or set quality does not support an increase.";
 
   return {
     ex,
     dayKey,
-    action,
+    action:presentation.action,
     nextTarget,
     why,
-    color,
-    priority,
+    color:presentation.color,
+    priority:presentation.priority,
     latestVolume:latest.volume,
     previousVolume:previous?.volume||0,
     volumePct,
@@ -1381,6 +1387,7 @@ function defaultCoachProfile(){
     daysPerWeek:3,
     sessionLength:60,
     equipment:{dumbbells:true,barbell:true,machines:true,cables:true,bodyweight:true},
+    limitations:[],
     splitPreference:"current_rotation",
     intensityPreference:"moderate",
     weakMuscleBias:true,
@@ -1394,6 +1401,9 @@ function normalizeCoachProfile(profile={}){
   const days=[3,4,5,6].includes(Number(profile.daysPerWeek))?Number(profile.daysPerWeek):base.daysPerWeek;
   const minutes=[30,45,60,75].includes(Number(profile.sessionLength))?Number(profile.sessionLength):base.sessionLength;
   const equipment={...base.equipment,...(profile.equipment||{})};
+  const limitations=Array.isArray(profile.limitations)
+    ?[...new Set(profile.limitations.filter(item=>typeof item==="string").map(item=>item.trim().toLowerCase()).filter(Boolean))]
+    :[];
   return {
     ...base,
     ...profile,
@@ -1402,6 +1412,7 @@ function normalizeCoachProfile(profile={}){
     daysPerWeek:days,
     sessionLength:minutes,
     equipment:Object.fromEntries(COACH_EQUIPMENT.map(item=>[item.id,!!equipment[item.id]])),
+    limitations,
     splitPreference:allowed(COACH_SPLITS,profile.splitPreference,base.splitPreference),
     intensityPreference:allowed(COACH_INTENSITIES,profile.intensityPreference,base.intensityPreference),
     weakMuscleBias:profile.weakMuscleBias!==false,
@@ -1411,18 +1422,28 @@ function normalizeCoachProfile(profile={}){
 
 function coachState(customEx={}){
   const raw=customEx?._coach&&typeof customEx._coach==="object"?customEx._coach:{};
+  const directExclusions=Array.isArray(raw.excludedExerciseIds)?raw.excludedExerciseIds:[];
+  const savedExclusions=Array.isArray(raw.exclusions)
+    ?raw.exclusions.filter(row=>row?.target_type==="exercise").map(row=>row.target_key)
+    :[];
   return {
     profile:normalizeCoachProfile(raw.profile||{}),
     plan:raw.plan&&Array.isArray(raw.plan.days)?raw.plan:null,
+    excludedExerciseIds:[...new Set([...directExclusions,...savedExclusions]
+      .filter(item=>typeof item==="string").map(item=>item.trim()).filter(Boolean))],
   };
 }
 
 function withCoachState(customEx={},nextCoach){
+  const current=coachState(customEx);
   return {
     ...customEx,
     _coach:{
       profile:normalizeCoachProfile(nextCoach?.profile||{}),
       plan:nextCoach?.plan||null,
+      excludedExerciseIds:Array.isArray(nextCoach?.excludedExerciseIds)
+        ?nextCoach.excludedExerciseIds
+        :current.excludedExerciseIds,
     },
   };
 }
@@ -1787,6 +1808,7 @@ function buildWorkoutReadinessGate(readinessScore,readiness,previewVol=0,prevDay
   const volumeLabel=volumeDeltaPct===null
     ? activeLoggedCount?`${previewVol.toLocaleString()} lbs logged so far.`:"No live volume yet."
     : `${volumeDeltaPct>=0?"+":""}${volumeDeltaPct}% vs last day volume.`;
+  const explanation=buildReadinessExplanation({...clean,volumeDeltaPct});
   return {
     workoutReadinessGate:true,
     mode,
@@ -1796,6 +1818,7 @@ function buildWorkoutReadinessGate(readinessScore,readiness,previewVol=0,prevDay
     volumeDeltaPct,
     readinessMix,
     guidance,
+    explanation,
     checks:[
       {label:"Volume Check",value:volumeLabel,color:bigJump?"#FFB347":"#38BFFF"},
       {label:"Readiness Mix",value:readinessMix,color:"#2DD4A0"},
@@ -3523,6 +3546,23 @@ async function clearCloudDraft(user){
     .update({draft:null,updated_at:new Date().toISOString()})
     .eq("user_id",user.id);
   if(error) throw error;
+}
+
+export async function loadPersistedCoachSwapContext(client,userId){
+  const settingsQuery=client.from("coach_settings")
+    .select("settings")
+    .eq("user_id",userId)
+    .maybeSingle();
+  const exclusionsQuery=client.from("coach_data_exclusions")
+    .select("target_type,target_key,selector")
+    .eq("user_id",userId);
+  const [settingsResult,exclusionsResult]=await Promise.all([settingsQuery,exclusionsQuery]);
+  if(settingsResult.error) throw settingsResult.error;
+  if(exclusionsResult.error) throw exclusionsResult.error;
+  return{
+    settings:settingsResult.data?.settings||null,
+    exclusions:Array.isArray(exclusionsResult.data)?exclusionsResult.data:[],
+  };
 }
 
 async function getOrCreatePublicProfile(user,username){
@@ -5837,7 +5877,7 @@ function TotalVolumeView({history,weeklyHistory=[],trackingMode,goals,customEx,o
   });
 
   return(
-    <div>
+    <div className="earned-workout-view earned-workout-view--today">
       <StarterLaunchpad history={history} goals={goals} customEx={customEx} onNavigate={onNavigate}/>
       <InsightsPanel history={history} customEx={customEx}/>
 
@@ -6198,7 +6238,8 @@ function DaySection({dayKey,history,goals,onSetGoal,customEx,onDeleteCustom}){
   const prevVol=prev?getDayVol(prev,dayKey,customEx):null;
   const diff=prevVol!=null?dayVol-prevVol:null;
   return(
-    <div style={{background:"#0a0d0c",borderRadius:6,padding:"13px",
+    <div className="earned-progress-day" data-day={dayKey}
+      style={{background:"#0a0d0c",borderRadius:6,padding:"13px",
       border:"1px solid #2a312e",borderLeft:`3px solid ${day.accent}`,marginBottom:12}}>
       <div onClick={()=>setCollapsed(c=>!c)} style={{display:"flex",justifyContent:"space-between",
         alignItems:"center",marginBottom:collapsed?0:12,cursor:"pointer",userSelect:"none"}}>
@@ -6234,8 +6275,8 @@ function PRWall({history,customEx}){
   const prs=getAllTimePRs(history,customEx);
   const [activeDk,setActiveDk]=useState("bicepsShoulders");
   return(
-    <div>
-      <div style={{display:"flex",gap:6,marginBottom:14}}>
+    <div className="earned-workout-view earned-workout-view--records">
+      <div className="earned-record-filter" style={{display:"flex",gap:6,marginBottom:14}}>
         {DAY_KEYS.map(dk=>(
           <button key={dk} onClick={()=>setActiveDk(dk)} style={{
             flex:1,padding:"8px 4px",borderRadius:9,border:"none",cursor:"pointer",
@@ -6251,7 +6292,8 @@ function PRWall({history,customEx}){
           const pr=prs[ex.id];
           if(!pr) return null;
           return(
-            <div key={ex.id} style={{background:"#0a0d0c",borderRadius:6,padding:"14px",
+            <div key={ex.id} className="earned-record-card"
+              style={{background:"#0a0d0c",borderRadius:6,padding:"14px",
               border:"1px solid #2a312e",borderLeft:`3px solid ${DAYS[activeDk].accent}`}}>
               <div style={{fontSize:12,fontWeight:700,color:"#ddd",marginBottom:10}}>
                 {ex.name}
@@ -6265,7 +6307,7 @@ function PRWall({history,customEx}){
                   {label:"Best Reps",value:`${pr.bestR} reps`,date:null,color:"#2DD4A0"},
                   {label:"Est. 1RM",value:`${pr.best1RM} lbs`,date:pr.best1RMDate,color:"#FFB347"},
                 ].map(({label,value,date,color})=>(
-                  <div key={label} style={{background:"#070908",borderRadius:9,
+                  <div key={label} className="earned-record-card__metric" style={{background:"#070908",borderRadius:9,
                     padding:"10px 10px",border:`1px solid ${color}18`}}>
                     <div style={{fontSize:8,color:color,textTransform:"uppercase",
                       letterSpacing:"0.1em",fontWeight:700,marginBottom:3}}>{label}</div>
@@ -6484,14 +6526,14 @@ function ExerciseLibraryView({history,customEx,onStartLibraryWorkout,onStartProg
   };
 
   return(
-    <div>
+    <div className="earned-workout-view earned-workout-view--library">
       <PremiumGate access={programPacksAccess}
         title="Curated program packs"
         description="Unlock trainer-style routines built around your available exercises."
         onUpgrade={onUpgrade} previewLabel="Premium Programs Preview">
         <ProgramPacksPanel customEx={customEx} onStartProgramPackDay={onStartProgramPackDay}/>
       </PremiumGate>
-      <div style={{background:"#0a0d0c",border:"1px solid #2a312e",borderRadius:6,
+      <div className="earned-library-toolbar" style={{background:"#0a0d0c",border:"1px solid #2a312e",borderRadius:6,
         padding:"14px",marginBottom:14}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:10}}>
           <div>
@@ -6554,7 +6596,7 @@ function ExerciseLibraryView({history,customEx,onStartLibraryWorkout,onStartProg
         </div>
       </div>
 
-      <div style={{display:"flex",flexDirection:"column",gap:9}}>
+      <div className="earned-library-grid" role="list" aria-label={`${filtered.length} matching exercises`}>
         {filtered.map(({ex,dk,profile},index)=>{
           const key=`${dk}_${ex.id}`,isOpen=open===key;
           const techniqueCoach=buildTechniqueCoach(ex,profile,dk);
@@ -6562,7 +6604,9 @@ function ExerciseLibraryView({history,customEx,onStartLibraryWorkout,onStartProg
           const lastLift=getLastLiftForExercise(history,ex.id)?.lift;
           const workingWeight=Number(lastLift?.w)||Number(ex.w)||45;
           return(
-            <div key={key} className="forge-armory-row" data-armory-row={key} style={{background:"#0a0d0c",
+            <div key={key} role="listitem"
+              className={`forge-armory-row${isOpen?" forge-armory-row--open":""}`}
+              data-armory-row={key} data-state={isOpen?"open":"closed"} style={{background:"#0a0d0c",
               border:`1px solid ${profile.color}33`,
               borderRadius:6,overflow:"hidden"}}>
               <button data-armory-index={index} aria-expanded={isOpen}
@@ -7035,12 +7079,22 @@ function WorkoutReadinessGate({gate}){
           </div>
         ))}
       </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(2,minmax(0,1fr))",gap:6,marginTop:6}}>
+        <div style={{borderTop:"1px solid #1d2923",paddingTop:7,minWidth:0}}>
+          <div style={{fontSize:7,color:"#2DD4A0",fontWeight:950,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:3}}>Supports</div>
+          <div style={{fontSize:9,color:"#b9c7bf",lineHeight:1.35,fontWeight:800}}>{gate.explanation?.positive}</div>
+        </div>
+        <div style={{borderTop:"1px solid #1d2923",paddingTop:7,minWidth:0}}>
+          <div style={{fontSize:7,color:"#FFB347",fontWeight:950,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:3}}>Protect</div>
+          <div style={{fontSize:9,color:"#b9c7bf",lineHeight:1.35,fontWeight:800}}>{gate.explanation?.limiting}</div>
+        </div>
+      </div>
     </div>
   );
 }
 
 // ─── Log Form ─────────────────────────────────────────────────────────────────
-function LogForm({history,trackingMode,onSubmit,customEx,onAddExercise,onRemoveExercise,onRestoreExercise,onSaveTemplate,onApplyTemplate,onDeleteTemplate,onSaveExerciseNote,initialDraft,saveDraft,onDraftCleared}){
+function LogForm({history,trackingMode,onSubmit,customEx,persistedCoachContext,onAddExercise,onRemoveExercise,onRestoreExercise,onSaveTemplate,onApplyTemplate,onDeleteTemplate,onSaveExerciseNote,initialDraft,saveDraft,onDraftCleared}){
   const isDaily=trackingMode===TRACKING_MODES.DAILY;
   const buildInputsFor=(dk)=>{
     const init={};
@@ -7399,7 +7453,13 @@ function LogForm({history,trackingMode,onSubmit,customEx,onAddExercise,onRemoveE
     ? exerciseNoteFor(activeFocusExercise.id,customEx)
     : null;
   const activeFocusSubstitutions=activeFocusExercise
-    ? buildExerciseSubstitutions(activeFocusExercise,activeDay,customEx,history)
+    ? buildEarnedExerciseSubstitutions(
+      activeFocusExercise,
+      activeDay,
+      customEx,
+      history,
+      persistedCoachContext,
+    )
     : [];
   const activeFocusWorkingWeight=Number.isFinite(activeFocusParsed.w)&&activeFocusParsed.w>0
     ? activeFocusParsed.w
@@ -7721,7 +7781,7 @@ function LogForm({history,trackingMode,onSubmit,customEx,onAddExercise,onRemoveE
   }
 
   return(
-    <div>
+    <div className="earned-workout-view earned-workout-view--train">
       {showRestoredNote&&(
         <div style={{background:"#0a1a12",border:"1px solid #1a3d2c",borderRadius:5,
           padding:"9px 12px",marginBottom:12,display:"flex",justifyContent:"space-between",
@@ -8623,7 +8683,8 @@ function LogForm({history,trackingMode,onSubmit,customEx,onAddExercise,onRemoveE
         </button>
       )}
 
-      <div style={{position:"sticky",bottom:8,zIndex:30,background:"rgba(7,7,26,0.94)",
+      <div className="earned-train-session-dock"
+        style={{position:"sticky",bottom:8,zIndex:30,background:"rgba(7,7,26,0.94)",
         border:`1px solid ${DAYS[activeDay].accent}55`,borderRadius:6,padding:"10px",
         marginTop:12,boxShadow:"0 8px 28px rgba(0,0,0,0.35)",backdropFilter:"blur(10px)"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,marginBottom:8}}>
@@ -8902,8 +8963,11 @@ function EditWeekModal({entry,index,customEx,onSave,onClose}){
 function HistoryView({history,trackingMode,onDelete,onEdit,customEx}){
   const isDaily=trackingMode===TRACKING_MODES.DAILY;
   const [expanded,setExpanded]=useState(null);
+  const [query,setQuery]=useState("");
+  const [filter,setFilter]=useState("all");
   if(history.length<1) return(
-    <div style={{background:"#0a0d0c",border:"1px solid #2a312e",borderRadius:6,
+    <div className="earned-workout-view earned-workout-view--history earned-workout-empty"
+      style={{background:"#0a0d0c",border:"1px solid #2a312e",borderRadius:6,
       padding:"40px 20px",textAlign:"center"}}>
       <div style={{fontSize:32,marginBottom:10}}>📋</div>
       <div style={{color:"#fff",fontWeight:800,fontSize:16,marginBottom:6}}>No history yet</div>
@@ -8911,10 +8975,58 @@ function HistoryView({history,trackingMode,onDelete,onEdit,customEx}){
     </div>
   );
   const rpeColor=n=>n<=3?"#2DD4A0":n<=6?"#FFB347":n<=8?"#FF9447":"#FF5C87";
+  const dayLabels=Object.fromEntries(DAY_KEYS.map(key=>[key,DAYS[key].label]));
+  const normalizedQuery=query.trim().toLowerCase();
+  const visibleRows=[...history].map((entry,i)=>({
+    entry,
+    i,
+    periodLabel:getEntryPeriodLabel(entry,i,{dayLabels}),
+    prCount:getWeekPRCount(entry,history.slice(0,i),customEx),
+  })).reverse().filter((row,reverseIndex)=>{
+    if(filter==="recent"&&reverseIndex>=8) return false;
+    if(filter==="records"&&row.prCount<1) return false;
+    if(!normalizedQuery) return true;
+    const searchText=[
+      row.periodLabel,
+      row.entry.date,
+      row.entry.notes,
+      row.entry.deload?"recovery":"",
+    ].filter(Boolean).join(" ").toLowerCase();
+    return searchText.includes(normalizedQuery);
+  });
   return(
-    <div>
-      {[...history].reverse().map((entry,ri)=>{
-        const i=history.length-1-ri;
+    <div className="earned-workout-view earned-workout-view--history">
+      <div className="earned-history-toolbar" aria-label="History filters">
+        <label>
+          <span>SEARCH LEDGER</span>
+          <input value={query} onChange={event=>setQuery(event.target.value)}
+            placeholder="Date, note, or workout" aria-label="Search workout history"/>
+        </label>
+        <div className="earned-history-toolbar__filters" role="group" aria-label="History range">
+          {[
+            ["all","All"],
+            ["recent","Recent 8"],
+            ["records","PR workouts"],
+          ].map(([id,label])=>(
+            <button key={id} type="button" aria-pressed={filter===id}
+              onClick={()=>setFilter(id)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <div className="earned-history-toolbar__count" aria-live="polite">
+          <strong>{visibleRows.length}</strong><span>shown</span>
+        </div>
+      </div>
+
+      {!visibleRows.length&&(
+        <div className="earned-history-empty">
+          <strong>No sessions match.</strong>
+          <span>Clear the search or choose another ledger filter.</span>
+        </div>
+      )}
+
+      {visibleRows.map(({entry,i,periodLabel,prCount})=>{
         const prev=isDaily
           ? [...history.slice(0,i)].reverse().find(row=>row.dayKey===entry.dayKey)||null
           : i>0?history[i-1]:null;
@@ -8927,11 +9039,10 @@ function HistoryView({history,trackingMode,onDelete,onEdit,customEx}){
           :entry.sourceIndexes?.length===1?entry.sourceIndexes[0]:null;
         const readOnlyAggregate=!isDaily&&entry.sourcePeriodType===PERIOD_TYPES.DAY&&entry.derived;
         const canAct=sourceIndex!=null&&!readOnlyAggregate;
-        const periodLabel=getEntryPeriodLabel(entry,i,{
-          dayLabels:Object.fromEntries(DAY_KEYS.map(key=>[key,DAYS[key].label])),
-        });
         return(
-          <div key={entry.periodId||`${entry.date}_${i}`} style={{background:"#0a0d0c",border:"1px solid #2a312e",
+          <div key={entry.periodId||`${entry.date}_${i}`} className="earned-history-entry"
+            data-expanded={isOpen?"true":"false"}
+            style={{background:"#0a0d0c",border:"1px solid #2a312e",
             borderRadius:6,marginBottom:9,overflow:"hidden"}}>
             <div onClick={()=>setExpanded(isOpen?null:i)} style={{padding:"13px 14px",cursor:"pointer",
               display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -8942,6 +9053,7 @@ function HistoryView({history,trackingMode,onDelete,onEdit,customEx}){
                   {entry.rating&&<span style={{marginLeft:8,color:"#FFB347"}}>{"★".repeat(entry.rating)}</span>}
                   {entry.rpe&&<span style={{marginLeft:8,fontSize:9,color:rpeColor(entry.rpe),fontWeight:700}}>RPE {entry.rpe}</span>}
                   {entry.deload&&<span style={{marginLeft:8,fontSize:9,color:"#38BFFF",fontWeight:800}}>RECOVERY</span>}
+                  {prCount>0&&<span className="earned-history-entry__pr">PR x{prCount}</span>}
                 </div>
                 <div style={{fontSize:15,fontWeight:900,color:"#fff"}}>
                   {total.toLocaleString()} lbs
@@ -9211,7 +9323,7 @@ function CommunityView({
   };
 
   return(
-    <div>
+    <div className="earned-workout-view earned-workout-view--feed">
       <div style={{background:"linear-gradient(140deg,#111512,#071622)",
         border:"1px solid #24304f",borderRadius:6,padding:"16px",marginBottom:14}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,marginBottom:14}}>
@@ -9459,7 +9571,7 @@ function CommunityView({
         )}
       </div>
 
-      <div style={{background:"linear-gradient(145deg,#101512,#071622 76%)",
+      <div className="earned-feed-challenges" style={{background:"linear-gradient(145deg,#101512,#071622 76%)",
         border:"1px solid #24304f",borderRadius:6,padding:"14px",marginBottom:16}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:12,marginBottom:12}}>
           <div>
@@ -9520,9 +9632,10 @@ function CommunityView({
             {challengeHub.completedCount} complete
           </div>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(145px,1fr))",gap:8}}>
+        <div className="earned-feed-challenge-rail" aria-label="Active community challenges">
           {challenges.map(challenge=>(
-            <div key={challenge.id} style={{background:challenge.completed?"#121a16":"#070908",
+            <div key={challenge.id} className="earned-feed-challenge-card"
+              style={{background:challenge.completed?"#121a16":"#070908",
               border:`1px solid ${challenge.completed?challenge.color+"55":challenge.color+"25"}`,
               borderRadius:5,padding:"10px 9px",minWidth:0}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,marginBottom:6}}>
@@ -9568,12 +9681,12 @@ function CommunityView({
         </div>
       )}
 
-      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      <div className="earned-feed-posts">
         {recent.map(entry=>{
           const recap=buildWorkoutRecap(entry,history.filter(e=>e.week<entry.week),customEx);
           const liked=!!social.likes?.[entry.week];
           return(
-            <div key={entry.week} style={{background:"#0a0d0c",border:"1px solid #2a312e",
+            <div key={entry.week} className="earned-feed-post" style={{background:"#0a0d0c",border:"1px solid #2a312e",
               borderRadius:6,padding:"13px 14px"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:10}}>
                 <div>
@@ -9990,8 +10103,8 @@ function GoalsView({history,weeklyHistory=[],trackingMode,goals,onSetGoal,onSetW
   const goalHistory=trackingMode===TRACKING_MODES.DAILY?weeklyHistory:history;
   const [wval,setWval]=useState(String(goals?.weeklyVolume||""));
   return(
-    <div>
-      <div style={{background:"#0a0d0c",border:"1px solid #2a312e",borderRadius:6,
+    <div className="earned-workout-view earned-workout-view--goals">
+      <div className="earned-goals-target" style={{background:"#0a0d0c",border:"1px solid #2a312e",borderRadius:6,
         padding:"16px",marginBottom:14}}>
         <div style={{fontSize:9,color:"#7C6FFF",textTransform:"uppercase",
           letterSpacing:"0.12em",fontWeight:700,marginBottom:8}}>Weekly Total Volume Goal</div>
@@ -10171,6 +10284,7 @@ export default function App(){
   const [customEx,setCustomEx]   = useState({});
   const [preferences,setPreferences] = useState(()=>normalizePreferences({}));
   const [draft,setDraft]         = useState(null);
+  const [persistedCoachContext,setPersistedCoachContext] = useState(null);
   const [loadState,setLoadState] = useState(LOCAL_VISUAL_QA?"ready":"loading"); // loading | ready | failed
   const [view,setView]           = useState(LOCAL_VISUAL_VIEW);
   const [goalModal,setGoalModal] = useState(null);
@@ -10331,12 +10445,19 @@ export default function App(){
     activeAccountName=authUser.username;
     setLoadState("loading");
     try{
-      const data=await loadCloudInitialData(authUser.user,authUser.username);
+      const [data,coachContext]=await Promise.all([
+        loadCloudInitialData(authUser.user,authUser.username),
+        loadPersistedCoachSwapContext(supabase,authUser.user.id).catch(error=>{
+          console.warn("Persisted Coach constraints unavailable.",error);
+          return null;
+        }),
+      ]);
       setHistory(data.history);
       setGoals(data.goals);
       setCustomEx(data.customEx);
       setPreferences(normalizePreferences(data.preferences));
       setDraft(data.draft||null);
+      setPersistedCoachContext(coachContext);
       setLoadState("ready");
       markSaved();
       refreshPublicSharing(authUser.user,authUser.username,data.history,data.customEx,{sync:true});
@@ -10446,6 +10567,7 @@ export default function App(){
     setCustomEx({});
     setPreferences(normalizePreferences({}));
     setDraft(null);
+    setPersistedCoachContext(null);
     setPublicProfile(null);
     setPublicPosts([]);
     setPublicLikes({counts:{},mine:{}});
@@ -10893,6 +11015,25 @@ export default function App(){
     :dashboardMomentum?.nextWorkout?.dayKey||fallbackDayKey;
   const dashboardLatest=progressHistory[progressHistory.length-1]||null;
   const dashboardWeek=weeklyHistory[weeklyHistory.length-1]||null;
+  const dashboardLatestVolume=dashboardLatest?getTotalVol(dashboardLatest,customEx):0;
+  const dashboardWeekVolume=dashboardWeek?getTotalVol(dashboardWeek,customEx):0;
+  const dashboardRecordCount=Object.keys(getAllTimePRs(progressHistory,customEx)).length;
+  const dashboardGoalCount=Object.entries(goals||{})
+    .filter(([key,value])=>key!=="weeklyVolume"&&Number(value)>0).length+(Number(goals?.weeklyVolume)>0?1:0);
+  const dashboardExerciseCount=DAY_KEYS.reduce((sum,dayKey)=>sum+allExercises(dayKey,customEx).length,0);
+  const workoutViewSignal=buildWorkoutViewSignal(view,{
+    trackingMode,
+    sessionCount:progressHistory.length,
+    streak,
+    latestVolume:dashboardLatestVolume,
+    weekVolume:dashboardWeekVolume,
+    weeklyGoal:goals?.weeklyVolume,
+    draft,
+    unreadCount:publicEngagement.unreadCount,
+    recordCount:dashboardRecordCount,
+    goalCount:dashboardGoalCount,
+    exerciseCount:dashboardExerciseCount,
+  });
   const navigateToView=nextView=>{
     if(!nextView||nextView===view) return;
     transitionView(()=>setView(nextView));
@@ -10965,7 +11106,8 @@ export default function App(){
       <AppNavigation items={tabs} activeView={view}
         unreadCount={publicEngagement.unreadCount} onNavigate={navigateToView}/>
 
-      <main className="earned-view-stage" key={`${view}-${trackingMode}`} data-view={view}>
+      <main id="earned-workout-view" role="tabpanel" aria-labelledby={`earned-tab-${view}`}
+        className="earned-view-stage" key={`${view}-${trackingMode}`} data-view={view}>
 
       <ViewIdentityBar
         view={view}
@@ -10973,18 +11115,32 @@ export default function App(){
         sessionCount={progressHistory.length}
         streak={streak}/>
 
+      <WorkoutEcosystemRail signal={workoutViewSignal}
+        onNavigate={navigateToView} onOpenPremium={()=>setPricingOpen(true)}/>
+
       <div className={`earned-page earned-page--${view}`}>
 
       {/* Unsaved draft banner, shown outside the Log tab so it's never missed */}
       {draft&&view!=="log"&&(
-        <div onClick={()=>navigateToView("log")} style={{background:"#1a1208",border:"1px solid #2a2010",
-          borderRadius:6,padding:"11px 14px",marginBottom:16,cursor:"pointer",
-          display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <section aria-label="Unfinished workout" style={{background:"#1a1208",border:"1px solid #2a2010",
+          borderRadius:6,padding:"11px 14px",marginBottom:16,display:"flex",justifyContent:"space-between",
+          alignItems:"center",gap:12,flexWrap:"wrap"}}>
           <span style={{fontSize:11,color:"#FFB347",fontWeight:700}}>
             ⏱ You have an unfinished workout log — tap to continue
           </span>
           <span style={{fontSize:14,color:"#FFB347"}}>→</span>
-        </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <button type="button" onClick={()=>navigateToView("log")} style={{border:"1px solid #FFB347",
+              background:"#FFB347",color:"#111",borderRadius:4,padding:"7px 10px",fontSize:10,fontWeight:800,cursor:"pointer"}}>
+              Resume workout
+            </button>
+            <button type="button" onClick={async()=>{
+              if(confirm("Discard this unfinished workout? Saved workout history will stay unchanged.")) await handleClearDraft();
+            }} style={{border:"1px solid #5a4630",background:"transparent",color:"#f4d9ac",borderRadius:4,padding:"7px 10px",fontSize:10,fontWeight:700,cursor:"pointer"}}>
+              Discard draft
+            </button>
+          </div>
+        </section>
       )}
 
       {showPostWorkoutUpgrade&&view==="total"&&subscription.status==="free"&&(
@@ -11002,8 +11158,8 @@ export default function App(){
           hasDraft={!!draft}
           streak={streak}
           streakUnit={trackingMode===TRACKING_MODES.DAILY?"days":"weeks"}
-          latestVolume={dashboardLatest?getTotalVol(dashboardLatest,customEx):0}
-          weekVolume={dashboardWeek?getTotalVol(dashboardWeek,customEx):0}
+          latestVolume={dashboardLatestVolume}
+          weekVolume={dashboardWeekVolume}
           weeklyGoal={goals?.weeklyVolume}
           sessionsTracked={progressHistory.length}
           history={progressHistory}
@@ -11029,14 +11185,18 @@ export default function App(){
         onUpgrade={()=>setPricingOpen(true)}
         onNavigate={navigateToView}
         hasDraft={!!draft}/>}
-      {view==="lifts"   &&DAY_KEYS.map(dk=>(
-        <DaySection key={dk} dayKey={dk} history={progressHistory} goals={goals} customEx={customEx}
-          onSetGoal={(id,name)=>setGoalModal({exId:id,exName:name})}
-          onDeleteCustom={(exId)=>{
-            if(confirm("Remove this exercise from your routine? Past logged data will be kept in history."))
-              handleRemoveExercise(dk,exId);
-          }}/>
-      ))}
+      {view==="lifts"   &&(
+        <div className="earned-workout-view earned-workout-view--progress">
+          {DAY_KEYS.map(dk=>(
+            <DaySection key={dk} dayKey={dk} history={progressHistory} goals={goals} customEx={customEx}
+              onSetGoal={(id,name)=>setGoalModal({exId:id,exName:name})}
+              onDeleteCustom={(exId)=>{
+                if(confirm("Remove this exercise from your routine? Past logged data will be kept in history."))
+                  handleRemoveExercise(dk,exId);
+              }}/>
+          ))}
+        </div>
+      )}
       {view==="prs"     &&<PRWall history={progressHistory} customEx={customEx}/>}
       {view==="library" &&<ExerciseLibraryView history={progressHistory} customEx={customEx}
         onStartLibraryWorkout={handleStartLibraryWorkout}
@@ -11066,6 +11226,7 @@ export default function App(){
         onDelete={handleDelete} onEdit={setEditWeekIndex} customEx={customEx}/>}
       {view==="log"     &&<LogForm key={trackingMode} history={progressHistory} trackingMode={trackingMode}
         onSubmit={handleNewPeriod} customEx={customEx}
+        persistedCoachContext={persistedCoachContext}
         onAddExercise={handleAddExercise} onRemoveExercise={handleRemoveExercise}
         onRestoreExercise={handleRestoreExercise}
         onSaveExerciseNote={handleSaveExerciseNote}
