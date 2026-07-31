@@ -12,3 +12,4 @@ tooling/ruflo/.claude-flow/metrics/
 evals/coach/results/
 rag-perf-results/
 supabase/.temp/
+supabase/.branches/
