@@ -5,3 +5,11 @@ dist
 .vercel
 .netlify
 *.log
+tooling/ruflo/reports/
+tooling/ruflo/.swarm/
+tooling/ruflo/.claude-flow/metrics/
+.env.coach.local
+evals/coach/results/
+rag-perf-results/
+supabase/.temp/
+supabase/.branches/
